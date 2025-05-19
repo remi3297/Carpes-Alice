@@ -30,6 +30,9 @@ const char* UPDATE_SIGNATURE = "CARPE_UPDATE_VALID_V1";
 const char* VERSION_URL = "http://raw.githack.com/remi3297/Carpes-Alice/main/version.json";
 const char* FIRMWARE_URL = "http://raw.githack.com/remi3297/Carpes-Alice/main/firmware_mecanique.bin";
 
+// Ajout d'une String persistante pour stocker l'URL du firmware
+String firmwareUrlString = "";
+
 // Variables globales
 HWCDC cdc;
 unsigned long previousMillis = 0;
@@ -222,9 +225,12 @@ void checkForUpdates() {
       if (strcmp(newVersion, CURRENT_VERSION) > 0) {
         updateAvailable = true;
         
-        // Update firmware URL if provided
+        // Update firmware URL if provided - PARTIE CORRIGÉE
         if (doc.containsKey("url")) {
-          FIRMWARE_URL = doc["url"];
+          firmwareUrlString = doc["url"].as<String>();
+          FIRMWARE_URL = firmwareUrlString.c_str();
+          cdc.print("Using firmware URL: ");
+          cdc.println(FIRMWARE_URL);
         }
       }
     }
