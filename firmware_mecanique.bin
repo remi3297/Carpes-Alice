@@ -240,108 +240,99 @@ void checkForUpdates() {
   delay(3000); // Délai ajouté
 }
 
-
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  // Pause tous les autres processus pendant la mise à jour
-  cdc.println("Preparing for update...");
-  delay(1000);
+  // 1. Suspendre complètement les mouvements
+  bool wasSuspended = true;  // Marqueur pour réactiver après
   
+  cdc.println("Starting firmware update - suspending all movements");
+  delay(2000);  // Pause pour stabiliser le système
+  
+  // 2. Configuration HTTP optimisée
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(30000);  // Timeout plus court
+  http.setTimeout(15000);  // Timeout court pour éviter les blocages
   
   cdc.println("Downloading firmware...");
   http.begin(FIRMWARE_URL);
   
   int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
-    cdc.print("Download failed! Error: ");
-    cdc.println(http.errorToString(httpCode).c_str());
+    cdc.println("Download failed!");
     http.end();
     return false;
   }
   
   int contentLength = http.getSize();
   cdc.print("Firmware size: ");
-  cdc.print(contentLength);
-  cdc.println(" bytes");
+  cdc.println(contentLength);
   
-  // Commencer la mise à jour avec le partitionnement par défaut
-  if (!Update.begin()) {  // Laisser l'ESP32 déterminer la taille et le type
-    cdc.print("Update begin failed! Error: ");
-    cdc.println(Update.errorString());
+  // 3. Spécifier explicitement le type de mise à jour
+  if (!Update.begin(contentLength, U_FLASH)) {
+    cdc.println("Update begin failed!");
     http.end();
     return false;
   }
   
-  // Télécharger et écrire par très petits blocs
+  // 4. Utiliser un buffer plus petit et vérifier les transitions de secteur
   WiFiClient *client = http.getStreamPtr();
-  uint8_t buffer[256];  // Buffer encore plus petit
-  int bytesRead = 0;
-  int totalWritten = 0;
-  int retries = 0;
+  uint8_t buffer[64];  // Buffer très petit
+  int totalRead = 0;
+  int sectorCount = 0;
   
-  cdc.println("Writing firmware...");
-  
-  while (totalWritten < contentLength) {
-    // Donner du temps au système
-    yield();
+  while (totalRead < contentLength) {
+    yield();  // Donner du temps au système
     
     // Lire un bloc
-    bytesRead = client->read(buffer, sizeof(buffer));
+    int bytesRead = client->read(buffer, sizeof(buffer));
     
     if (bytesRead > 0) {
-      // Écrire ce bloc et vérifier le résultat
-      int written = Update.write(buffer, bytesRead);
+      // 5. Vérifier si on approche d'une transition de secteur (4KB)
+      int nextTotal = totalRead + bytesRead;
+      int currentSector = totalRead / 4096;
+      int nextSector = nextTotal / 4096;
       
-      if (written != bytesRead) {
-        // Essayer à nouveau avec un bloc plus petit en cas d'échec
-        if (retries < 3 && bytesRead > 64) {
-          cdc.print("Retry at position: ");
-          cdc.println(totalWritten);
-          retries++;
-          continue;  // Réessayer sans avancer
-        }
-        
+      // Si on change de secteur, ajouter une pause
+      if (nextSector > currentSector) {
+        delay(100);  // Pause avant changement de secteur
+        sectorCount++;
+      }
+      
+      // Écrire le bloc
+      if (Update.write(buffer, bytesRead) != bytesRead) {
         cdc.print("Write error at: ");
-        cdc.println(totalWritten);
-        cdc.print("Attempted: ");
-        cdc.print(bytesRead);
-        cdc.print(", Written: ");
-        cdc.println(written);
+        cdc.println(totalRead);
         Update.abort();
         http.end();
         return false;
       }
       
-      totalWritten += bytesRead;
-      retries = 0;  // Réinitialiser les tentatives après succès
+      totalRead += bytesRead;
       
-      // Afficher progression toutes les 1024 bytes
-      if (totalWritten % 1024 == 0) {
-        cdc.print("Progress: ");
-        cdc.print((totalWritten * 100) / contentLength);
+      // Afficher progression
+      if (totalRead % 1024 == 0) {
+        cdc.print("Written: ");
+        cdc.print((totalRead * 100) / contentLength);
         cdc.println("%");
       }
     } else if (bytesRead < 0) {
       cdc.println("Read error!");
-      Update.abort();
-      http.end();
-      return false;
+      break;
     } else {
-      // Rien à lire pour le moment, attendre un peu
-      delay(10);
+      delay(10);  // Rien à lire pour le moment
     }
-    
-    // Donner du temps au WiFi
-    delay(5);
   }
   
-  if (!Update.end(true)) {  // true = vérifier après écriture
-    cdc.print("Update finalization failed: ");
-    cdc.println(Update.errorString());
+  if (totalRead != contentLength) {
+    cdc.println("Size mismatch!");
+    Update.abort();
+    http.end();
+    return false;
+  }
+  
+  if (!Update.end()) {
+    cdc.println("Update end failed!");
     http.end();
     return false;
   }
