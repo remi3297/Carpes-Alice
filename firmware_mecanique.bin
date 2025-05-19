@@ -72,6 +72,7 @@ void setup() {
 
   // Connexion WiFi (non bloquante)
   WiFi.begin(WIFI_SSID, WIFI_PASS);
+  cdc.print("Connecting to WiFi...");
 
   // Attendre la connexion WiFi (max 10 secondes)
   uint8_t attempts = 0;
@@ -84,6 +85,8 @@ void setup() {
   if (WiFi.status() == WL_CONNECTED) {
     wifiConnected = true;
     cdc.println("WiFi Connected!");
+    cdc.print("IP address: ");
+    cdc.println(WiFi.localIP().toString());
   } else {
     cdc.println("WiFi Failed! Running in offline mode.");
   }
@@ -190,6 +193,10 @@ void checkForUpdates() {
   if (WiFi.status() != WL_CONNECTED) return;
 
   HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(10000);
+  http.setUserAgent("ESP32-CarpeUpdate/1.0");
+  
   http.begin(VERSION_URL);
   int httpCode = http.GET();
 
@@ -207,6 +214,10 @@ void checkForUpdates() {
 
     if (doc.containsKey("version")) {
       const char* newVersion = doc["version"];
+      cdc.print("Current version: ");
+      cdc.print(CURRENT_VERSION);
+      cdc.print(", Available version: ");
+      cdc.println(newVersion);
       
       // Simple string comparison (assumes semantic versioning)
       if (strcmp(newVersion, CURRENT_VERSION) > 0) {
@@ -218,6 +229,9 @@ void checkForUpdates() {
         }
       }
     }
+  } else {
+    cdc.print("HTTP GET failed, error: ");
+    cdc.println(http.errorToString(httpCode).c_str());
   }
   
   http.end();
@@ -227,12 +241,24 @@ void checkForUpdates() {
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
+  // Amélioration des options HTTP pour éviter les erreurs
   HTTPClient http;
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(10000);
+  http.setUserAgent("ESP32-CarpeUpdate/1.0");
+
+  cdc.print("Connecting to firmware URL: ");
+  cdc.println(FIRMWARE_URL);
+  
   http.begin(FIRMWARE_URL);
   int httpCode = http.GET();
+  
+  cdc.print("HTTP response code: ");
+  cdc.println(httpCode);
 
   if (httpCode != HTTP_CODE_OK) {
-    cdc.println("Failed to download update!");
+    cdc.print("Failed to download update! Error: ");
+    cdc.println(http.errorToString(httpCode).c_str());
     http.end();
     return false;
   }
@@ -244,10 +270,18 @@ bool downloadAndInstallUpdate() {
     return false;
   }
 
+  cdc.print("Firmware size: ");
+  cdc.print(contentLength);
+  cdc.println(" bytes");
+
   // Verify signature in first 1KB
   uint8_t buffer[1024];
   WiFiClient *client = http.getStreamPtr();
   int bytesRead = client->readBytes(buffer, min(1024, contentLength));
+  
+  cdc.print("Read ");
+  cdc.print(bytesRead);
+  cdc.println(" bytes for signature verification");
   
   bool signatureFound = false;
   for (int i = 0; i < bytesRead - strlen(UPDATE_SIGNATURE); i++) {
@@ -263,17 +297,29 @@ bool downloadAndInstallUpdate() {
     return false;
   }
 
-  // Reset client position
+  cdc.println("Signature verified. Downloading firmware...");
+
+  // Reset client position with delay
   http.end();
+  delay(2000); // Ajouter un délai de 2 secondes entre les requêtes HTTP
+  
+  // Configuration de la nouvelle requête HTTP
+  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+  http.setTimeout(20000);
+  http.setUserAgent("ESP32-CarpeUpdate/1.0");
+  
   http.begin(FIRMWARE_URL);
   httpCode = http.GET();
+  
   if (httpCode != HTTP_CODE_OK) {
-    cdc.println("Failed to restart download!");
+    cdc.print("Failed to restart download! Error: ");
+    cdc.println(http.errorToString(httpCode).c_str());
     http.end();
     return false;
   }
   
   // Begin OTA update
+  cdc.println("Starting OTA update...");
   if (!Update.begin(contentLength)) {
     cdc.println("Not enough space for update!");
     http.end();
@@ -282,6 +328,12 @@ bool downloadAndInstallUpdate() {
 
   client = http.getStreamPtr();
   size_t written = Update.writeStream(*client);
+
+  cdc.print("Written ");
+  cdc.print(written);
+  cdc.print(" of ");
+  cdc.print(contentLength);
+  cdc.println(" bytes");
 
   if (written != contentLength) {
     cdc.println("Write error during update!");
