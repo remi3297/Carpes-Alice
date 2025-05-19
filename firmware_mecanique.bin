@@ -240,7 +240,7 @@ void checkForUpdates() {
   delay(3000); // Délai ajouté
 }
 
-// Télécharge et installe la mise à jour
+
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
@@ -248,119 +248,42 @@ bool downloadAndInstallUpdate() {
   
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(120000); // 2 minutes
+  http.setTimeout(60000);  // 60 secondes max
   
-  cdc.print("Connecting to firmware URL: ");
-  cdc.println(FIRMWARE_URL);
-  
+  cdc.println("Downloading and installing firmware...");
   http.begin(FIRMWARE_URL);
-  int httpCode = http.GET();
   
-  cdc.print("HTTP response code: ");
-  cdc.println(httpCode);
-
+  int httpCode = http.GET();
   if (httpCode != HTTP_CODE_OK) {
-    cdc.print("Failed to download update! Error: ");
+    cdc.print("Download failed! Error: ");
     cdc.println(http.errorToString(httpCode).c_str());
     http.end();
     return false;
   }
-
+  
   int contentLength = http.getSize();
-  if (contentLength <= 0) {
-    cdc.println("Empty firmware file!");
-    http.end();
-    return false;
-  }
-
   cdc.print("Firmware size: ");
   cdc.print(contentLength);
   cdc.println(" bytes");
-
-  // Préparer les variables pour la lecture et vérification de signature
-  WiFiClient *client = http.getStreamPtr();
-  uint8_t buffer[1024];
-  bool signatureFound = false;
-  String tempStr = "";
-  int signatureCheckRemaining = 16384; // Vérifier les 16 premiers Ko
   
-  // Début de la mise à jour
-  if (!Update.begin(contentLength)) {
-    cdc.println("Not enough space for update!");
+  // Commencer la mise à jour
+  if (!Update.begin(contentLength, U_FLASH)) {
+    cdc.print("Not enough space! Error: ");
+    cdc.println(Update.errorString());
     http.end();
     return false;
   }
-
-  // Télécharger et installer le firmware en une seule passe
-  int totalRead = 0;
-  int readLen = 0;
   
-  cdc.println("Downloading and installing firmware...");
+  // Télécharger et installer directement
+  WiFiClient *client = http.getStreamPtr();
+  size_t written = Update.writeStream(*client);
   
-  // Boucle de téléchargement et installation
-  while (totalRead < contentLength) {
-    if (client->available()) {
-      readLen = client->read(buffer, sizeof(buffer));
-      
-      if (readLen > 0) {
-        // Vérifier la signature dans les premiers 16K si pas encore trouvée
-        if (!signatureFound && signatureCheckRemaining > 0) {
-          // Limiter la vérification au nombre d'octets restant à vérifier
-          int checkLen = min(readLen, signatureCheckRemaining);
-          signatureCheckRemaining -= checkLen;
-          
-          // Ajouter à la chaîne temporaire pour la recherche
-          for (int i = 0; i < checkLen; i++) {
-            tempStr += (char)buffer[i];
-          }
-          
-          // Vérifier si la signature est présente
-          if (tempStr.indexOf(UPDATE_SIGNATURE) >= 0) {
-            signatureFound = true;
-            cdc.println("Firmware signature found!");
-          }
-          
-          // Si on a vérifié 16K sans trouver la signature, abandonner
-          if (signatureCheckRemaining <= 0 && !signatureFound) {
-            cdc.println("ERROR: No signature found in first 16KB. Aborting update.");
-            Update.abort();
-            http.end();
-            return false;
-          }
-        }
-        
-        // Écrire le firmware
-        if (Update.write(buffer, readLen) != readLen) {
-          cdc.println("Error: Failed to write firmware!");
-          Update.abort();
-          http.end();
-          return false;
-        }
-        
-        totalRead += readLen;
-        
-        // Afficher la progression à intervalles réguliers
-        if (totalRead % 8192 == 0) {
-          cdc.print("Progress: ");
-          cdc.print((totalRead * 100) / contentLength);
-          cdc.println("%");
-        }
-      }
-    } else {
-      // Sortir de la boucle si pas de données disponibles et tout a été lu
-      if (totalRead == contentLength) {
-        break;
-      }
-      
-      // Petit délai pour éviter de surchauffer le CPU
-      delay(1);
-    }
-  }
-  
-  cdc.println("Download complete!");
-  
-  if (totalRead != contentLength) {
-    cdc.println("Size mismatch! Update failed.");
+  if (written != contentLength) {
+    cdc.print("Size mismatch: ");
+    cdc.print(written);
+    cdc.print(" vs ");
+    cdc.print(contentLength);
+    cdc.println(" bytes");
     Update.abort();
     http.end();
     return false;
