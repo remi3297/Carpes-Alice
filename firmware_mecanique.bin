@@ -240,15 +240,15 @@ void checkForUpdates() {
   delay(3000); // Délai ajouté
 }
 
-// Télécharge et installe la mise à jour - FONCTION MODIFIÉE
+// Télécharge et installe la mise à jour
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
   delay(3000);
   
   HTTPClient http;
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS); // Mode FORCE pour meilleure prise en charge
-  http.setTimeout(120000); // 2 minutes pour le téléchargement
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.setTimeout(120000); // 2 minutes
   
   cdc.print("Connecting to firmware URL: ");
   cdc.println(FIRMWARE_URL);
@@ -277,88 +277,109 @@ bool downloadAndInstallUpdate() {
   cdc.print(contentLength);
   cdc.println(" bytes");
 
+  // Vérifier la signature d'abord - télécharger et vérifier les premiers 16KB
+  WiFiClient *client = http.getStreamPtr();
+  uint8_t buffer[1024];
+  int bytesRead = 0;
+  int totalRead = 0;
+  bool signatureFound = false;
+  String firstChunk = "";
+
+  cdc.println("Checking for signature...");
+  
+  // Lire les premiers 16KB pour chercher la signature
+  while (totalRead < 16384 && totalRead < contentLength) {
+    bytesRead = client->read(buffer, sizeof(buffer));
+    if (bytesRead <= 0) break;
+    
+    totalRead += bytesRead;
+    
+    // Convertir en string pour recherche facile
+    for (int i = 0; i < bytesRead; i++) {
+      firstChunk += (char)buffer[i];
+    }
+    
+    // Chercher la signature
+    if (firstChunk.indexOf(UPDATE_SIGNATURE) >= 0) {
+      signatureFound = true;
+      cdc.println("Firmware signature found!");
+      break;
+    }
+  }
+  
+  if (!signatureFound) {
+    cdc.println("ERROR: Firmware signature not found! Update aborted.");
+    http.end();
+    return false;
+  }
+  
+  // Redémarrer le téléchargement pour l'installation
+  http.end();
+  delay(1000);
+  
+  http.begin(FIRMWARE_URL);
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  http.setTimeout(120000);
+  
+  httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    cdc.println("Failed to restart download for installation!");
+    http.end();
+    return false;
+  }
+  
+  contentLength = http.getSize();
+  
   // Commencer la mise à jour
+  cdc.println("Starting firmware installation...");
   if (!Update.begin(contentLength)) {
     cdc.println("Not enough space for update!");
     http.end();
     return false;
   }
-
-  // Variables pour la vérification de signature
-  bool signatureFound = false;
-  WiFiClient *client = http.getStreamPtr();
-  uint8_t buffer[128]; // Plus petit buffer pour éviter les problèmes de mémoire
   
-  // Télécharger le firmware par blocs et l'installer
-  int totalRead = 0;
-  int readLength = 0;
+  // Télécharger et installer le firmware
+  client = http.getStreamPtr();
+  size_t written = 0;
   
-  // Tampons pour rechercher la signature
-  char signatureBuf[128]; // Buffer pour stocker des caractères consécutifs
-  int bufPos = 0;
-  memset(signatureBuf, 0, sizeof(signatureBuf));
-  
-  cdc.println("Starting download and installation...");
+  uint8_t installBuffer[1024];
+  int bytesToRead = 0;
+  totalRead = 0;
   
   while (totalRead < contentLength) {
-    // Lire un bloc du firmware
-    readLength = client->read(buffer, sizeof(buffer));
-    
-    if (readLength <= 0) {
-      if (client->available()) {
-        continue;
-      } else {
-        break;
-      }
+    bytesToRead = client->read(installBuffer, sizeof(installBuffer));
+    if (bytesToRead <= 0) {
+      if (client->available()) continue;
+      else break;
     }
     
-    // Écrire le bloc dans la flash
-    if (Update.write(buffer, readLength) != readLength) {
+    if (Update.write(installBuffer, bytesToRead) != bytesToRead) {
       cdc.println("Error writing firmware to flash!");
       Update.abort();
       http.end();
       return false;
     }
     
-    totalRead += readLength;
+    totalRead += bytesToRead;
+    written += bytesToRead;
     
-    // Vérification de signature dans les premiers 16Ko seulement
-    if (!signatureFound && totalRead < 16384) {
-      // Convertir le buffer en caractères pour chercher la signature
-      for (int i = 0; i < readLength; i++) {
-        // Ajouter le caractère au buffer circulaire
-        signatureBuf[bufPos] = (char)buffer[i];
-        bufPos = (bufPos + 1) % (sizeof(signatureBuf) - 1);
-        signatureBuf[bufPos] = '\0'; // Assurer la terminaison
-        
-        // Vérifier si le buffer contient la signature
-        if (strstr(signatureBuf, UPDATE_SIGNATURE) != NULL) {
-          signatureFound = true;
-          cdc.println("Firmware signature found!");
-          break;
-        }
-      }
-    }
-    
-    // Afficher la progression toutes les 8Ko
-    if (totalRead % 8192 == 0) {
-      cdc.print("Downloaded and installed: ");
-      cdc.print(totalRead);
-      cdc.print(" of ");
-      cdc.print(contentLength);
-      cdc.println(" bytes");
+    // Afficher progression toutes les 16KB
+    if (totalRead % 16384 == 0) {
+      cdc.print("Progress: ");
+      cdc.print((totalRead * 100) / contentLength);
+      cdc.println("%");
     }
   }
   
-  cdc.println("Download complete!");
-  
-  // Vérifier la signature
-  if (!signatureFound) {
-    cdc.println("Warning: Firmware signature not found!");
-    // Continue quand même mais avec un avertissement
+  if (written != contentLength) {
+    cdc.println("Size mismatch, download incomplete!");
+    Update.abort();
+    http.end();
+    return false;
   }
   
-  // Finaliser la mise à jour
+  cdc.println("Installation complete, finalizing...");
+  
   if (!Update.end()) {
     cdc.print("Update error: ");
     cdc.println(Update.errorString());
@@ -366,13 +387,6 @@ bool downloadAndInstallUpdate() {
     return false;
   }
   
-  if (Update.hasError()) {
-    cdc.print("Update error: ");
-    cdc.println(Update.errorString());
-    http.end();
-    return false;
-  }
-
   cdc.println("Update successful!");
   http.end();
   return true;
