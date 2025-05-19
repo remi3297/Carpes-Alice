@@ -194,8 +194,7 @@ void checkForUpdates() {
 
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(10000);
-  http.setUserAgent("ESP32-CarpeUpdate/1.0");
+  http.setTimeout(30000);
   
   http.begin(VERSION_URL);
   int httpCode = http.GET();
@@ -229,23 +228,22 @@ void checkForUpdates() {
         }
       }
     }
-  } else {
-    cdc.print("HTTP GET failed, error: ");
-    cdc.println(http.errorToString(httpCode).c_str());
   }
   
   http.end();
+  delay(3000); // Délai ajouté
 }
 
 // Télécharge et installe la mise à jour
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
+  delay(5000); // Attendre avant de télécharger
+  
   // Amélioration des options HTTP pour éviter les erreurs
   HTTPClient http;
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(10000);
-  http.setUserAgent("ESP32-CarpeUpdate/1.0");
+  http.setTimeout(60000); // 1 minute
 
   cdc.print("Connecting to firmware URL: ");
   cdc.println(FIRMWARE_URL);
@@ -301,12 +299,11 @@ bool downloadAndInstallUpdate() {
 
   // Reset client position with delay
   http.end();
-  delay(2000); // Ajouter un délai de 2 secondes entre les requêtes HTTP
+  delay(5000); // Délai augmenté à 5 secondes
   
   // Configuration de la nouvelle requête HTTP
   http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(20000);
-  http.setUserAgent("ESP32-CarpeUpdate/1.0");
+  http.setTimeout(120000); // 2 minutes
   
   http.begin(FIRMWARE_URL);
   httpCode = http.GET();
@@ -327,6 +324,8 @@ bool downloadAndInstallUpdate() {
   }
 
   client = http.getStreamPtr();
+  cdc.println("Writing firmware to flash...");
+  
   size_t written = Update.writeStream(*client);
 
   cdc.print("Written ");
