@@ -30,7 +30,6 @@ const char* UPDATE_SIGNATURE = "CARPE_UPDATE_VALID_V1";
 const char* VERSION_URL = "http://raw.githack.com/remi3297/Carpes-Alice/main/version.json";
 const char* FIRMWARE_URL = "https://cdn.statically.io/gh/remi3297/Carpes-Alice/main/firmware_mecanique.bin";
 
-
 // Ajout d'une String persistante pour stocker l'URL du firmware
 String firmwareUrlString = "";
 
@@ -241,17 +240,14 @@ void checkForUpdates() {
   delay(3000); // Délai ajouté
 }
 
-// Télécharge et installe la mise à jour
+// Télécharge et installe la mise à jour - MÉTHODE AMÉLIORÉE
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
-
-  delay(5000); // Attendre avant de télécharger
   
-  // Amélioration des options HTTP pour éviter les erreurs
   HTTPClient http;
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(60000); // 1 minute
-
+  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS); // Forcer au lieu de STRICT
+  http.setTimeout(120000); // 2 minutes
+  
   cdc.print("Connecting to firmware URL: ");
   cdc.println(FIRMWARE_URL);
   
@@ -279,81 +275,100 @@ bool downloadAndInstallUpdate() {
   cdc.print(contentLength);
   cdc.println(" bytes");
 
-  // Verify signature in first 1KB
-  uint8_t buffer[1024];
-  WiFiClient *client = http.getStreamPtr();
-  int bytesRead = client->readBytes(buffer, min(1024, contentLength));
-  
-  cdc.print("Read ");
-  cdc.print(bytesRead);
-  cdc.println(" bytes for signature verification");
-  
-  bool signatureFound = false;
-  for (int i = 0; i < bytesRead - strlen(UPDATE_SIGNATURE); i++) {
-    if (memcmp(&buffer[i], UPDATE_SIGNATURE, strlen(UPDATE_SIGNATURE)) == 0) {
-      signatureFound = true;
-      break;
-    }
-  }
-
-  if (!signatureFound) {
-    cdc.println("Invalid firmware signature! Update rejected.");
-    http.end();
-    return false;
-  }
-
-  cdc.println("Signature verified. Downloading firmware...");
-
-  // Reset client position with delay
-  http.end();
-  delay(5000); // Délai augmenté à 5 secondes
-  
-  // Configuration de la nouvelle requête HTTP
-  http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-  http.setTimeout(120000); // 2 minutes
-  
-  http.begin(FIRMWARE_URL);
-  httpCode = http.GET();
-  
-  if (httpCode != HTTP_CODE_OK) {
-    cdc.print("Failed to restart download! Error: ");
-    cdc.println(http.errorToString(httpCode).c_str());
-    http.end();
-    return false;
-  }
-  
-  // Begin OTA update
-  cdc.println("Starting OTA update...");
+  // Commencer la mise à jour
   if (!Update.begin(contentLength)) {
     cdc.println("Not enough space for update!");
     http.end();
     return false;
   }
 
-  client = http.getStreamPtr();
-  cdc.println("Writing firmware to flash...");
+  // Variables pour la vérification de signature
+  bool signatureFound = false;
+  WiFiClient *client = http.getStreamPtr();
+  uint8_t buffer[128];
+  String checksumBuffer = ""; // Petit tampon pour chercher la signature
   
-  size_t written = Update.writeStream(*client);
-
-  cdc.print("Written ");
-  cdc.print(written);
-  cdc.print(" of ");
-  cdc.print(contentLength);
-  cdc.println(" bytes");
-
+  // Télécharger et installer le firmware
+  size_t written = 0;
+  size_t bytesRead = 0;
+  
+  cdc.println("Downloading and installing firmware...");
+  
+  // Télécharger par blocs
+  while (written < contentLength) {
+    // Attendre que des données soient disponibles
+    if (!client->available()) {
+      delay(10);
+      continue;
+    }
+    
+    // Lire un bloc
+    bytesRead = client->read(buffer, sizeof(buffer));
+    if (bytesRead <= 0) continue;
+    
+    // Vérifier la signature dans les premiers blocs
+    if (!signatureFound && written < 4096) {
+      // Ajouter les 50 premiers caractères de chaque bloc au tampon de recherche
+      // (limité pour éviter de consommer trop de mémoire)
+      for (size_t i = 0; i < min(50, bytesRead); i++) {
+        checksumBuffer += (char)buffer[i];
+      }
+      
+      // Recherche de la signature dans le tampon
+      if (checksumBuffer.indexOf(UPDATE_SIGNATURE) >= 0) {
+        signatureFound = true;
+        cdc.println("Update signature found!");
+      }
+      
+      // Limiter la taille du tampon pour éviter les problèmes de mémoire
+      if (checksumBuffer.length() > 256) {
+        checksumBuffer = checksumBuffer.substring(checksumBuffer.length() - 256);
+      }
+    }
+    
+    // Écrire le bloc dans la mémoire flash
+    if (Update.write(buffer, bytesRead) != bytesRead) {
+      cdc.println("Error writing firmware to flash!");
+      Update.abort();
+      http.end();
+      return false;
+    }
+    
+    written += bytesRead;
+    
+    // Afficher la progression toutes les 4Ko
+    if (written % 4096 == 0 || written == contentLength) {
+      cdc.print("Progress: ");
+      cdc.print((written * 100) / contentLength);
+      cdc.println("%");
+    }
+  }
+  
+  // Vérifier que le firmware est complet
   if (written != contentLength) {
-    cdc.println("Write error during update!");
+    cdc.println("Firmware download incomplete!");
+    Update.abort();
     http.end();
     return false;
   }
-
+  
+  // Vérifier que la signature a été trouvée
+  if (!signatureFound) {
+    cdc.println("Update signature not found! Aborting update.");
+    Update.abort();
+    http.end();
+    return false;
+  }
+  
+  // Finaliser la mise à jour
+  cdc.println("Finalizing update...");
   if (!Update.end()) {
     cdc.print("Update error: ");
     cdc.println(Update.errorString());
     http.end();
     return false;
   }
-
+  
   cdc.println("Update successful!");
   http.end();
   return true;
