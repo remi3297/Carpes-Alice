@@ -244,11 +244,13 @@ void checkForUpdates() {
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
 
-  delay(3000);
+  // Pause tous les autres processus pendant la mise à jour
+  cdc.println("Preparing for update...");
+  delay(1000);
   
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(60000);
+  http.setTimeout(30000);  // Timeout plus court
   
   cdc.println("Downloading firmware...");
   http.begin(FIRMWARE_URL);
@@ -266,44 +268,62 @@ bool downloadAndInstallUpdate() {
   cdc.print(contentLength);
   cdc.println(" bytes");
   
-  // Commencer la mise à jour avec le type auto
-  if (!Update.begin(contentLength)) {
-    cdc.print("Not enough space! Error: ");
+  // Commencer la mise à jour avec le partitionnement par défaut
+  if (!Update.begin()) {  // Laisser l'ESP32 déterminer la taille et le type
+    cdc.print("Update begin failed! Error: ");
     cdc.println(Update.errorString());
     http.end();
     return false;
   }
   
-  // Télécharger et écrire par petits blocs
+  // Télécharger et écrire par très petits blocs
   WiFiClient *client = http.getStreamPtr();
-  uint8_t buffer[512];  // Plus petit buffer
-  size_t bytesRead = 0;
-  size_t totalWritten = 0;
+  uint8_t buffer[256];  // Buffer encore plus petit
+  int bytesRead = 0;
+  int totalWritten = 0;
+  int retries = 0;
   
   cdc.println("Writing firmware...");
+  
   while (totalWritten < contentLength) {
-    // Lire un petit bloc
+    // Donner du temps au système
+    yield();
+    
+    // Lire un bloc
     bytesRead = client->read(buffer, sizeof(buffer));
     
     if (bytesRead > 0) {
-      // Écrire ce bloc dans la flash
-      if (Update.write(buffer, bytesRead) != bytesRead) {
-        cdc.print("Error writing at: ");
+      // Écrire ce bloc et vérifier le résultat
+      int written = Update.write(buffer, bytesRead);
+      
+      if (written != bytesRead) {
+        // Essayer à nouveau avec un bloc plus petit en cas d'échec
+        if (retries < 3 && bytesRead > 64) {
+          cdc.print("Retry at position: ");
+          cdc.println(totalWritten);
+          retries++;
+          continue;  // Réessayer sans avancer
+        }
+        
+        cdc.print("Write error at: ");
         cdc.println(totalWritten);
+        cdc.print("Attempted: ");
+        cdc.print(bytesRead);
+        cdc.print(", Written: ");
+        cdc.println(written);
         Update.abort();
         http.end();
         return false;
       }
       
       totalWritten += bytesRead;
+      retries = 0;  // Réinitialiser les tentatives après succès
       
-      // Afficher la progression
-      if (totalWritten % 2048 == 0) {
-        cdc.print("Written: ");
-        cdc.print(totalWritten);
-        cdc.print(" of ");
-        cdc.print(contentLength);
-        cdc.println(" bytes");
+      // Afficher progression toutes les 1024 bytes
+      if (totalWritten % 1024 == 0) {
+        cdc.print("Progress: ");
+        cdc.print((totalWritten * 100) / contentLength);
+        cdc.println("%");
       }
     } else if (bytesRead < 0) {
       cdc.println("Read error!");
@@ -311,34 +331,16 @@ bool downloadAndInstallUpdate() {
       http.end();
       return false;
     } else {
-      // bytesRead == 0, attendre un peu
+      // Rien à lire pour le moment, attendre un peu
       delay(10);
     }
     
-    // Si on a tout lu, sortir
-    if (totalWritten >= contentLength) {
-      break;
-    }
-    
-    // Un petit délai pour le WiFi
-    delay(1);
+    // Donner du temps au WiFi
+    delay(5);
   }
   
-  cdc.print("Total written: ");
-  cdc.print(totalWritten);
-  cdc.print(" of ");
-  cdc.print(contentLength);
-  cdc.println(" bytes");
-  
-  if (totalWritten != contentLength) {
-    cdc.println("Size mismatch!");
-    Update.abort();
-    http.end();
-    return false;
-  }
-  
-  if (!Update.end()) {
-    cdc.print("Update error: ");
+  if (!Update.end(true)) {  // true = vérifier après écriture
+    cdc.print("Update finalization failed: ");
     cdc.println(Update.errorString());
     http.end();
     return false;
