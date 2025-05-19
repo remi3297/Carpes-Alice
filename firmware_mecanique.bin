@@ -28,7 +28,8 @@ const char* UPDATE_SIGNATURE = "CARPE_UPDATE_VALID_V1";
 
 // URLs pour la mise à jour
 const char* VERSION_URL = "http://raw.githack.com/remi3297/Carpes-Alice/main/version.json";
-const char* FIRMWARE_URL = "http://raw.githack.com/remi3297/Carpes-Alice/main/firmware_mecanique.bin";
+const char* FIRMWARE_URL = "https://cdn.statically.io/gh/remi3297/Carpes-Alice/main/firmware_mecanique.bin";
+
 
 // Ajout d'une String persistante pour stocker l'URL du firmware
 String firmwareUrlString = "";
