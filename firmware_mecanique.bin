@@ -1,0 +1,302 @@
+#include <Arduino.h>
+#include <ArduinoJson.h>
+#include <HTTPClient.h>
+#include <WiFi.h>
+#include <Update.h>
+
+#include "USB.h"
+#include "USBCDC.h"
+#include "driver/ledc.h"
+
+// Définitions matérielles
+#define LED 7
+#define H1 6
+#define H2 5
+#define SLEEP 4
+
+// Définitions PWM
+#define LEDC_RESOLUTION 4 // 4 bits resolution
+#define LEDC_MODE 0
+#define LEDC_DUTY 0          // Duty cycle set to 0%
+#define LEDC_FREQUENCY 250000  // Frequency set to 250 kHz
+
+// Signature obligatoire pour les mises à jour (sécurité) - DOIT ÊTRE PRÉSENTE
+const char* UPDATE_SIGNATURE = "CARPE_UPDATE_VALID_V1";
+
+// Version du firmware mise à jour
+#define CURRENT_VERSION "1.1.0"
+
+// URLs pour la mise à jour
+const char* VERSION_URL = "https://raw.githubusercontent.com/remi3297/Carpes-Alice/main/version.json";
+const char* FIRMWARE_URL = "https://raw.githubusercontent.com/remi3297/Carpes-Alice/main/firmware.bin";
+
+// Variables globales
+HWCDC cdc;
+unsigned long previousMillis = 0;
+const long moveInterval = 1000; // 1 mouvement toutes les secondes (mouvement mécanique)
+unsigned long lastUpdateCheck = 0;
+const long updateInterval = 60000; // vérifier mise à jour toutes les minutes
+bool updateAvailable = false;
+bool wifiConnected = false;
+
+// Prototypes
+void moveMechanical();
+void checkForUpdates();
+bool downloadAndInstallUpdate();
+
+void setup() {
+  // Configuration des pins
+  pinMode(LED, OUTPUT);
+  pinMode(H1, OUTPUT);
+  pinMode(H2, OUTPUT);
+  pinMode(SLEEP, OUTPUT);
+  digitalWrite(SLEEP, LOW);
+
+  // Initialisation communication
+  cdc.begin(460800);
+  delay(2000);
+  cdc.println("Carpe v" CURRENT_VERSION " starting...");
+  cdc.println("MOUVEMENT MÉCANIQUE ACTIVÉ - TEST DE MISE À JOUR RÉUSSI");
+
+  // Configuration des canaux PWM
+  ledcSetup(LEDC_CHANNEL_0, LEDC_FREQUENCY, LEDC_RESOLUTION);
+  ledcAttachPin(H1, LEDC_CHANNEL_0);
+  ledcSetup(LEDC_CHANNEL_1, LEDC_FREQUENCY, LEDC_RESOLUTION);
+  ledcAttachPin(H2, LEDC_CHANNEL_1);
+
+  // Signal de démarrage
+  for (uint8_t i = 0; i < 10; i++) {
+    digitalWrite(LED, !digitalRead(LED));
+    delay(100);
+  }
+
+  // Connexion WiFi (non bloquante)
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+
+  // Attendre la connexion WiFi (max 10 secondes)
+  uint8_t attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
+    delay(500);
+    cdc.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    cdc.println("WiFi Connected!");
+  } else {
+    cdc.println("WiFi Failed! Running in offline mode.");
+  }
+
+  digitalWrite(SLEEP, HIGH);
+  previousMillis = millis();
+  lastUpdateCheck = millis();
+}
+
+void loop() {
+  unsigned long currentMillis = millis();
+
+  // Vérifier les mises à jour si WiFi connecté
+  if (wifiConnected && (currentMillis - lastUpdateCheck >= updateInterval)) {
+    lastUpdateCheck = currentMillis;
+    cdc.println("Checking for updates...");
+    checkForUpdates();
+
+    if (updateAvailable) {
+      cdc.println("Update available! Downloading...");
+      // Télécharger et installer pendant que la carpe continue à bouger
+      if (downloadAndInstallUpdate()) {
+        cdc.println("Update successful! Restarting...");
+        delay(1000);
+        ESP.restart();
+      } else {
+        cdc.println("Update failed!");
+        updateAvailable = false;
+      }
+    }
+  }
+
+  // Mouvement MÉCANIQUE (1 par seconde)
+  if (currentMillis - previousMillis >= moveInterval) {
+    previousMillis = currentMillis;
+    moveMechanical();
+  }
+
+  // Retenter la connexion WiFi périodiquement si déconnecté
+  if (!wifiConnected && (currentMillis % 300000) < 10) { // Toutes les 5 minutes
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+    delay(5000);
+    wifiConnected = (WiFi.status() == WL_CONNECTED);
+    if (wifiConnected) {
+      cdc.println("WiFi reconnected!");
+    }
+  }
+}
+
+// Fonction de mouvement MÉCANIQUE (1 par seconde)
+void moveMechanical() {
+  const uint8_t mappedValue = 14;  // Même valeur fixe
+  cdc.println("mechanical move");
+
+  // Un seul cycle de mouvement précis
+  digitalWrite(H2, LOW);  // clockwise
+  digitalWrite(LED, HIGH);
+  digitalWrite(SLEEP, HIGH);
+  
+  // Accélération rapide
+  for (uint8_t j = 0; j < mappedValue; j++) {
+    ledcWrite(LEDC_CHANNEL_0, j);
+    delay(10);  // Accélération plus rapide
+  }
+  
+  delay(50);  // Courte pause
+  
+  // Décélération rapide
+  for (uint8_t j = mappedValue; j > 0; j--) {
+    ledcWrite(LEDC_CHANNEL_0, j);
+    delay(10);  // Décélération plus rapide
+  }
+  
+  digitalWrite(SLEEP, LOW);
+  delay(100);  // Pause courte
+
+  // Mouvement inverse
+  digitalWrite(H1, LOW); // counter clockwise
+  digitalWrite(LED, LOW);
+  digitalWrite(SLEEP, HIGH);
+
+  // Accélération rapide
+  for (uint8_t j = 0; j < mappedValue; j++) {
+    ledcWrite(LEDC_CHANNEL_1, j);
+    delay(10);
+  }
+  
+  delay(50);  // Courte pause
+  
+  // Décélération rapide
+  for (uint8_t j = mappedValue; j > 0; j--) {
+    ledcWrite(LEDC_CHANNEL_1, j);
+    delay(10);
+  }
+  
+  digitalWrite(SLEEP, LOW);
+  
+  // Court délai pour compléter exactement 1 seconde
+  delay(100);
+}
+
+// Vérifie si une mise à jour est disponible
+void checkForUpdates() {
+  if (WiFi.status() != WL_CONNECTED) return;
+
+  HTTPClient http;
+  http.begin(VERSION_URL);
+  int httpCode = http.GET();
+
+  if (httpCode == HTTP_CODE_OK) {
+    String payload = http.getString();
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, payload);
+    
+    if (error) {
+      cdc.print("deserializeJson() failed: ");
+      cdc.println(error.c_str());
+      http.end();
+      return;
+    }
+
+    if (doc.containsKey("version")) {
+      const char* newVersion = doc["version"];
+      
+      // Simple string comparison (assumes semantic versioning)
+      if (strcmp(newVersion, CURRENT_VERSION) > 0) {
+        updateAvailable = true;
+        
+        // Update firmware URL if provided
+        if (doc.containsKey("url")) {
+          FIRMWARE_URL = doc["url"];
+        }
+      }
+    }
+  }
+  
+  http.end();
+}
+
+// Télécharge et installe la mise à jour
+bool downloadAndInstallUpdate() {
+  if (WiFi.status() != WL_CONNECTED) return false;
+
+  HTTPClient http;
+  http.begin(FIRMWARE_URL);
+  int httpCode = http.GET();
+
+  if (httpCode != HTTP_CODE_OK) {
+    cdc.println("Failed to download update!");
+    http.end();
+    return false;
+  }
+
+  int contentLength = http.getSize();
+  if (contentLength <= 0) {
+    cdc.println("Empty firmware file!");
+    http.end();
+    return false;
+  }
+
+  // Verify signature in first 1KB
+  uint8_t buffer[1024];
+  WiFiClient *client = http.getStreamPtr();
+  int bytesRead = client->readBytes(buffer, min(1024, contentLength));
+  
+  bool signatureFound = false;
+  for (int i = 0; i < bytesRead - strlen(UPDATE_SIGNATURE); i++) {
+    if (memcmp(&buffer[i], UPDATE_SIGNATURE, strlen(UPDATE_SIGNATURE)) == 0) {
+      signatureFound = true;
+      break;
+    }
+  }
+
+  if (!signatureFound) {
+    cdc.println("Invalid firmware signature! Update rejected.");
+    http.end();
+    return false;
+  }
+
+  // Reset client position
+  http.end();
+  http.begin(FIRMWARE_URL);
+  httpCode = http.GET();
+  if (httpCode != HTTP_CODE_OK) {
+    cdc.println("Failed to restart download!");
+    http.end();
+    return false;
+  }
+  
+  // Begin OTA update
+  if (!Update.begin(contentLength)) {
+    cdc.println("Not enough space for update!");
+    http.end();
+    return false;
+  }
+
+  client = http.getStreamPtr();
+  size_t written = Update.writeStream(*client);
+
+  if (written != contentLength) {
+    cdc.println("Write error during update!");
+    http.end();
+    return false;
+  }
+
+  if (!Update.end()) {
+    cdc.print("Update error: ");
+    cdc.println(Update.errorString());
+    http.end();
+    return false;
+  }
+
+  cdc.println("Update successful!");
+  http.end();
+  return true;
+}
