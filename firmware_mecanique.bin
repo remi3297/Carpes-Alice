@@ -251,9 +251,12 @@ bool downloadAndInstallUpdate() {
   sizeCheck.begin(FIRMWARE_URL);
   sizeCheck.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   
-  // Faire une requête HEAD pour obtenir la taille sans télécharger
-  sizeCheck.sendRequest("HEAD");
-  int contentLength = sizeCheck.getSize();
+  int httpCode = sizeCheck.GET();
+  int contentLength = 0;
+  
+  if (httpCode == HTTP_CODE_OK) {
+    contentLength = sizeCheck.getSize();
+  }
   sizeCheck.end();
   
   if (contentLength <= 0) {
@@ -278,7 +281,7 @@ bool downloadAndInstallUpdate() {
   while (bytesWritten < contentLength) {
     // Calculer taille du prochain chunk
     int remainingBytes = contentLength - bytesWritten;
-    int currentChunkSize = min(CHUNK_SIZE, remainingBytes);
+    int currentChunkSize = (remainingBytes < CHUNK_SIZE) ? remainingBytes : CHUNK_SIZE;
     
     // Préparer range header pour télécharger juste ce morceau
     char range[64];
@@ -296,7 +299,7 @@ bool downloadAndInstallUpdate() {
     cdc.print(" to ");
     cdc.println(bytesWritten + currentChunkSize - 1);
     
-    int httpCode = http.GET();
+    httpCode = http.GET();
     if (httpCode != HTTP_CODE_OK && httpCode != HTTP_CODE_PARTIAL_CONTENT) {
       cdc.print("Chunk download failed! Error: ");
       cdc.println(httpCode);
@@ -312,7 +315,11 @@ bool downloadAndInstallUpdate() {
     int chunkBytesWritten = 0;
     
     while (chunkBytesWritten < currentChunkSize) {
-      bytesRead = client->read(buffer, min(sizeof(buffer), currentChunkSize - chunkBytesWritten));
+      // Correction du problème de typage avec min()
+      int toRead = currentChunkSize - chunkBytesWritten;
+      if (toRead > (int)sizeof(buffer)) toRead = sizeof(buffer);
+      
+      bytesRead = client->read(buffer, toRead);
       
       if (bytesRead <= 0) break;
       
