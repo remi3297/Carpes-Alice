@@ -242,102 +242,108 @@ void checkForUpdates() {
 
 bool downloadAndInstallUpdate() {
   if (WiFi.status() != WL_CONNECTED) return false;
-
-  // 1. Suspendre complètement les mouvements
-  bool wasSuspended = true;  // Marqueur pour réactiver après
   
-  cdc.println("Starting firmware update - suspending all movements");
-  delay(2000);  // Pause pour stabiliser le système
+  cdc.println("Starting chunked firmware update...");
+  delay(2000);
   
-  // 2. Configuration HTTP optimisée
-  HTTPClient http;
-  http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(15000);  // Timeout court pour éviter les blocages
+  // 1. Obtenir la taille totale du firmware
+  HTTPClient sizeCheck;
+  sizeCheck.begin(FIRMWARE_URL);
+  sizeCheck.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
   
-  cdc.println("Downloading firmware...");
-  http.begin(FIRMWARE_URL);
+  // Faire une requête HEAD pour obtenir la taille sans télécharger
+  sizeCheck.sendRequest("HEAD");
+  int contentLength = sizeCheck.getSize();
+  sizeCheck.end();
   
-  int httpCode = http.GET();
-  if (httpCode != HTTP_CODE_OK) {
-    cdc.println("Download failed!");
-    http.end();
+  if (contentLength <= 0) {
+    cdc.println("Cannot determine firmware size!");
     return false;
   }
   
-  int contentLength = http.getSize();
   cdc.print("Firmware size: ");
-  cdc.println(contentLength);
+  cdc.print(contentLength);
+  cdc.println(" bytes");
   
-  // 3. Spécifier explicitement le type de mise à jour
-  if (!Update.begin(contentLength, U_FLASH)) {
-    cdc.println("Update begin failed!");
-    http.end();
+  // 2. Commencer la mise à jour
+  if (!Update.begin(contentLength)) {
+    cdc.println("Not enough space for update!");
     return false;
   }
   
-  // 4. Utiliser un buffer plus petit et vérifier les transitions de secteur
-  WiFiClient *client = http.getStreamPtr();
-  uint8_t buffer[64];  // Buffer très petit
-  int totalRead = 0;
-  int sectorCount = 0;
+  // 3. Télécharger et écrire par chunks de 1KB
+  const int CHUNK_SIZE = 1024;
+  int bytesWritten = 0;
   
-  while (totalRead < contentLength) {
-    yield();  // Donner du temps au système
+  while (bytesWritten < contentLength) {
+    // Calculer taille du prochain chunk
+    int remainingBytes = contentLength - bytesWritten;
+    int currentChunkSize = min(CHUNK_SIZE, remainingBytes);
     
-    // Lire un bloc
-    int bytesRead = client->read(buffer, sizeof(buffer));
+    // Préparer range header pour télécharger juste ce morceau
+    char range[64];
+    sprintf(range, "bytes=%d-%d", bytesWritten, bytesWritten + currentChunkSize - 1);
     
-    if (bytesRead > 0) {
-      // 5. Vérifier si on approche d'une transition de secteur (4KB)
-      int nextTotal = totalRead + bytesRead;
-      int currentSector = totalRead / 4096;
-      int nextSector = nextTotal / 4096;
+    HTTPClient http;
+    http.begin(FIRMWARE_URL);
+    http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+    
+    // Ajouter le header Range pour récupérer juste le chunk actuel
+    http.addHeader("Range", range);
+    
+    cdc.print("Downloading chunk: ");
+    cdc.print(bytesWritten);
+    cdc.print(" to ");
+    cdc.println(bytesWritten + currentChunkSize - 1);
+    
+    int httpCode = http.GET();
+    if (httpCode != HTTP_CODE_OK && httpCode != HTTP_CODE_PARTIAL_CONTENT) {
+      cdc.print("Chunk download failed! Error: ");
+      cdc.println(httpCode);
+      Update.abort();
+      http.end();
+      return false;
+    }
+    
+    // Lire et écrire le chunk
+    WiFiClient *client = http.getStreamPtr();
+    uint8_t buffer[128];
+    int bytesRead = 0;
+    int chunkBytesWritten = 0;
+    
+    while (chunkBytesWritten < currentChunkSize) {
+      bytesRead = client->read(buffer, min(sizeof(buffer), currentChunkSize - chunkBytesWritten));
       
-      // Si on change de secteur, ajouter une pause
-      if (nextSector > currentSector) {
-        delay(100);  // Pause avant changement de secteur
-        sectorCount++;
-      }
+      if (bytesRead <= 0) break;
       
-      // Écrire le bloc
       if (Update.write(buffer, bytesRead) != bytesRead) {
-        cdc.print("Write error at: ");
-        cdc.println(totalRead);
+        cdc.println("Error writing to flash!");
         Update.abort();
         http.end();
         return false;
       }
       
-      totalRead += bytesRead;
-      
-      // Afficher progression
-      if (totalRead % 1024 == 0) {
-        cdc.print("Written: ");
-        cdc.print((totalRead * 100) / contentLength);
-        cdc.println("%");
-      }
-    } else if (bytesRead < 0) {
-      cdc.println("Read error!");
-      break;
-    } else {
-      delay(10);  // Rien à lire pour le moment
+      chunkBytesWritten += bytesRead;
     }
-  }
-  
-  if (totalRead != contentLength) {
-    cdc.println("Size mismatch!");
-    Update.abort();
+    
+    bytesWritten += chunkBytesWritten;
     http.end();
-    return false;
+    
+    // Afficher progression
+    cdc.print("Progress: ");
+    cdc.print((bytesWritten * 100) / contentLength);
+    cdc.println("%");
+    
+    // Pause entre les chunks pour que WiFi et autres processus puissent respirer
+    delay(500);
   }
   
   if (!Update.end()) {
-    cdc.println("Update end failed!");
-    http.end();
+    cdc.print("Update error: ");
+    cdc.println(Update.errorString());
     return false;
   }
   
   cdc.println("Update successful!");
-  http.end();
   return true;
 }
