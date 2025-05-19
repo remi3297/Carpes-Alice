@@ -248,9 +248,9 @@ bool downloadAndInstallUpdate() {
   
   HTTPClient http;
   http.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
-  http.setTimeout(60000);  // 60 secondes max
+  http.setTimeout(60000);
   
-  cdc.println("Downloading and installing firmware...");
+  cdc.println("Downloading firmware...");
   http.begin(FIRMWARE_URL);
   
   int httpCode = http.GET();
@@ -266,24 +266,72 @@ bool downloadAndInstallUpdate() {
   cdc.print(contentLength);
   cdc.println(" bytes");
   
-  // Commencer la mise à jour
-  if (!Update.begin(contentLength, U_FLASH)) {
+  // Commencer la mise à jour avec le type auto
+  if (!Update.begin(contentLength)) {
     cdc.print("Not enough space! Error: ");
     cdc.println(Update.errorString());
     http.end();
     return false;
   }
   
-  // Télécharger et installer directement
+  // Télécharger et écrire par petits blocs
   WiFiClient *client = http.getStreamPtr();
-  size_t written = Update.writeStream(*client);
+  uint8_t buffer[512];  // Plus petit buffer
+  size_t bytesRead = 0;
+  size_t totalWritten = 0;
   
-  if (written != contentLength) {
-    cdc.print("Size mismatch: ");
-    cdc.print(written);
-    cdc.print(" vs ");
-    cdc.print(contentLength);
-    cdc.println(" bytes");
+  cdc.println("Writing firmware...");
+  while (totalWritten < contentLength) {
+    // Lire un petit bloc
+    bytesRead = client->read(buffer, sizeof(buffer));
+    
+    if (bytesRead > 0) {
+      // Écrire ce bloc dans la flash
+      if (Update.write(buffer, bytesRead) != bytesRead) {
+        cdc.print("Error writing at: ");
+        cdc.println(totalWritten);
+        Update.abort();
+        http.end();
+        return false;
+      }
+      
+      totalWritten += bytesRead;
+      
+      // Afficher la progression
+      if (totalWritten % 2048 == 0) {
+        cdc.print("Written: ");
+        cdc.print(totalWritten);
+        cdc.print(" of ");
+        cdc.print(contentLength);
+        cdc.println(" bytes");
+      }
+    } else if (bytesRead < 0) {
+      cdc.println("Read error!");
+      Update.abort();
+      http.end();
+      return false;
+    } else {
+      // bytesRead == 0, attendre un peu
+      delay(10);
+    }
+    
+    // Si on a tout lu, sortir
+    if (totalWritten >= contentLength) {
+      break;
+    }
+    
+    // Un petit délai pour le WiFi
+    delay(1);
+  }
+  
+  cdc.print("Total written: ");
+  cdc.print(totalWritten);
+  cdc.print(" of ");
+  cdc.print(contentLength);
+  cdc.println(" bytes");
+  
+  if (totalWritten != contentLength) {
+    cdc.println("Size mismatch!");
     Update.abort();
     http.end();
     return false;
